@@ -3,10 +3,11 @@ mod database;
 mod models;
 
 use chrono::TimeDelta;
+use commands::{get_delete_button, DELETE_MESSAGE_EMOJI, DELETE_MESSAGE_INTERACTION_CUSTOM_ID};
 use database::{create_table_if_nonexistent, delete_reminder_by_id, get_all_reminders};
 use poise::{
     samples::create_application_commands,
-    serenity_prelude::{self as serenity, CreateMessage},
+    serenity_prelude::{self as serenity, CreateMessage, FullEvent},
 };
 use std::{cmp::Reverse, collections::BinaryHeap, env, sync::Arc};
 use tokio::sync::Mutex;
@@ -45,10 +46,6 @@ async fn main() -> Result<(), Error> {
             commands::get_reminders(),
             commands::remind_me_in_10_seconds(),
             commands::remind_me_in_1_hour(),
-            commands::remind_me_in_3_hours(),
-            commands::remind_me_in_6_hours(),
-            commands::remind_me_in_12_hours(),
-            commands::remind_me_in_24_hours(),
             commands::remind_me_in(),
         ];
 
@@ -84,9 +81,57 @@ async fn main() -> Result<(), Error> {
             })
         },
         skip_checks_for_owners: false,
-        event_handler: |_ctx, event, _framework, _data| {
+        event_handler: |ctx, event, framework, _data| {
             Box::pin(async move {
                 println!("Received event: {}", event.snake_case_name());
+
+                match event {
+                    FullEvent::ReactionAdd { add_reaction } => {
+                        let is_reactor_not_the_bot = add_reaction.user_id != Some(framework.bot_id);
+                        let is_message_from_the_bot =
+                            add_reaction.message_author_id == Some(framework.bot_id);
+                        let is_reaction_emoji_delete =
+                            add_reaction.emoji.unicode_eq(DELETE_MESSAGE_EMOJI);
+
+                        if is_reactor_not_the_bot
+                            && is_message_from_the_bot
+                            && is_reaction_emoji_delete
+                        {
+                            ctx.http
+                                .delete_message(
+                                    add_reaction.channel_id,
+                                    add_reaction.message_id,
+                                    Some(&format!(
+                                        "Deletion requested by: {}",
+                                        add_reaction
+                                            .message_author_id
+                                            .map_or("Unknown".to_string(), |id| id.to_string())
+                                    )),
+                                )
+                                .await?;
+                        }
+                    }
+                    FullEvent::InteractionCreate { interaction } => {
+                        if let Some(component_interaction) = interaction.as_message_component() {
+                            if component_interaction.data.custom_id
+                                == DELETE_MESSAGE_INTERACTION_CUSTOM_ID
+                            {
+                                ctx.http
+                                    .delete_message(
+                                        component_interaction.channel_id,
+                                        component_interaction.message.id,
+                                        Some(&format!(
+                                            "Deletion requested by: {}",
+                                            component_interaction.user.id
+                                        )),
+                                    )
+                                    .await?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
                 Ok(())
             })
         },
@@ -194,7 +239,8 @@ async fn send_reminders(
                     let user_id = serenity::UserId::new(reminder.0.user_id());
 
                     let message = CreateMessage::default()
-                        .embed(reminder.0.to_embed(&http).await);
+                        .embed(reminder.0.to_embed(&http).await)
+                        .button(get_delete_button());
 
                     user_id
                         .create_dm_channel(&http)

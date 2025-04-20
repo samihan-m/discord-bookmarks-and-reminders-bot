@@ -4,11 +4,14 @@ use crate::{
 };
 
 use poise::{
-    serenity_prelude::{self as serenity, CreateEmbed},
+    serenity_prelude::{self as serenity, CreateButton, CreateEmbed},
     CreateReply,
 };
 
 use crate::{Context, Error};
+
+pub const DELETE_MESSAGE_EMOJI: &str = "🗑️";
+pub const DELETE_MESSAGE_INTERACTION_CUSTOM_ID: &str = "delete_reminder";
 
 /// A slightly modified version of [`poise::builtins::autocomplete_command`] that trims the input string
 /// to enable something kinda like a fuzzy search - I wanted this because I found myself inputting
@@ -159,48 +162,6 @@ pub async fn remind_me_in_1_hour(
     Ok(())
 }
 
-#[poise::command(context_menu_command = "Remind me in 3 hours")]
-pub async fn remind_me_in_3_hours(
-    ctx: Context<'_>,
-    message: serenity::Message,
-) -> Result<(), Error> {
-    let remind_at = chrono::Utc::now() + chrono::Duration::hours(3);
-
-    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
-
-    ctx.send(get_reminder_created_reply(&remind_at)).await?;
-
-    Ok(())
-}
-
-#[poise::command(context_menu_command = "Remind me in 6 hours")]
-pub async fn remind_me_in_6_hours(
-    ctx: Context<'_>,
-    message: serenity::Message,
-) -> Result<(), Error> {
-    let remind_at = chrono::Utc::now() + chrono::Duration::hours(6);
-
-    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
-
-    ctx.send(get_reminder_created_reply(&remind_at)).await?;
-
-    Ok(())
-}
-
-#[poise::command(context_menu_command = "Remind me in 12 hours")]
-pub async fn remind_me_in_12_hours(
-    ctx: Context<'_>,
-    message: serenity::Message,
-) -> Result<(), Error> {
-    let remind_at = chrono::Utc::now() + chrono::Duration::hours(12);
-
-    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
-
-    ctx.send(get_reminder_created_reply(&remind_at)).await?;
-
-    Ok(())
-}
-
 #[poise::command(context_menu_command = "Remind me in 24 hour")]
 pub async fn remind_me_in_24_hours(
     ctx: Context<'_>,
@@ -251,6 +212,15 @@ fn get_reminder_created_reply(remind_at: &chrono::DateTime<chrono::Utc>) -> Crea
         ))
         .reply(true)
         .ephemeral(true)
+}
+
+pub fn get_delete_button() -> CreateButton {
+    CreateButton::new(DELETE_MESSAGE_INTERACTION_CUSTOM_ID)
+        .label("Delete")
+        .emoji(serenity::ReactionType::Unicode(
+            DELETE_MESSAGE_EMOJI.to_string(),
+        ))
+        .style(serenity::ButtonStyle::Danger)
 }
 
 #[cfg(test)]

@@ -1,10 +1,12 @@
-use std::time::Duration;
+use crate::{
+    database::{get_reminders_for_user, insert_reminder},
+    models::{ParseReminderError, Reminder},
+};
 
 use poise::{
-    serenity_prelude::{self as serenity, CreateEmbed, CreateMessage},
+    serenity_prelude::{self as serenity, CreateEmbed},
     CreateReply,
 };
-use tokio::time::sleep;
 
 use crate::{Context, Error};
 
@@ -46,82 +48,260 @@ pub async fn help(
     Ok(())
 }
 
-/// Set a reminder
-#[poise::command(context_menu_command = "Remind Me")]
-pub async fn remind_me_context_menu_command(
+/// Get a subset of your pending reminders
+#[poise::command(slash_command)]
+pub async fn get_reminders(
     ctx: Context<'_>,
-    message: serenity::Message,
+    #[description = "Maximum quantity of reminders to fetch. Defaults to 20."]
+    #[min = 1]
+    #[max = 100]
+    maximum_quantity: Option<u64>,
 ) -> Result<(), Error> {
-    let wait_duration = Duration::from_secs(10);
+    let quantity_to_retrieve = maximum_quantity.unwrap_or(20);
 
-    tokio::try_join!(
-        async {
-            match ctx.guild_channel().await {
-                Some(_) => {
-                    message.react(ctx.http(), '⏰').await?;
-                }
-                None => {
-                    // If the command was run in a DM, we can't react at the moment (don't have authorization or whatever)
-                    // without causing an error, so just skip it
-                }
-            };
-            Ok(())
-        },
-        async {
-            ctx.send(
-                CreateReply::default()
-                    .content(format!(
-                        "Reminder set! I will remind you in {} seconds.",
-                        wait_duration.as_secs()
-                    ))
-                    .reply(true)
-                    .ephemeral(true),
-            )
-            .await
-        },
-        async {
-            sleep(wait_duration).await;
-            Ok(())
-        }
-    )?;
+    let reminders = get_reminders_for_user(
+        &ctx.data().db_connection,
+        ctx.author().id.get(),
+        quantity_to_retrieve,
+    )
+    .await?;
 
+    if reminders.is_empty() {
+        ctx.send(
+            CreateReply::default()
+                .content("No reminders found in the database.")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    ctx.send(create_get_reminders_reply(&reminders)).await?;
+
+    Ok(())
+}
+
+fn create_get_reminders_reply(reminders: &[Result<Reminder, ParseReminderError>]) -> CreateReply {
     let title = format!(
-        "Reminder from {}",
-        ctx.channel_id()
-            .name(ctx.http())
-            // This will error if we don't have permission to get DM channel information (which we currently do not)
-            .await
-            .map(|name| format!("[#{}]({})", name, message.link()))
-            .unwrap_or("the past!".to_string())
+        "Retrieved up to {} reminder{}.\nThere may be more reminders not shown.",
+        reminders.len(),
+        if reminders.len() > 1 { "s" } else { "" }
     );
     const MAX_TITLE_LENGTH: usize = 256;
     let trimmed_title = &title[..title.len().min(MAX_TITLE_LENGTH)];
 
-    let description = format!(
-        r#"
-        # {}
-        # {}
-    "#,
-        message.content,
-        message.link()
-    );
+    let description = format!("## Queued Reminders: {}", reminders.len());
     const MAX_DESCRIPTION_LENGTH: usize = 4096;
     let trimmed_description = &description[..description.len().min(MAX_DESCRIPTION_LENGTH)];
 
-    ctx.author()
-        .create_dm_channel(ctx.http())
-        .await?
-        .send_message(
-            ctx.http(),
-            CreateMessage::default().add_embed(
-                CreateEmbed::default()
-                    .title(trimmed_title)
-                    .description(trimmed_description)
-                    .timestamp(message.timestamp)
-                    .colour(serenity::Colour::TEAL),
-            ),
+    CreateReply::default()
+        .embed(
+            CreateEmbed::default()
+                .title(trimmed_title)
+                .description(trimmed_description)
+                .fields(reminders.iter().filter_map(|reminder| match reminder {
+                    Err(_) => None,
+                    Ok(reminder) => {
+                        let field_name = format!(
+                            "{} at: {}",
+                            reminder.message().link(),
+                            get_discord_relative_timestamp_string(reminder.remind_at())
+                        );
+                        const MAX_FIELD_NAME_LENGTH: usize = 256;
+                        let trimmed_field_name =
+                            &field_name[..field_name.len().min(MAX_FIELD_NAME_LENGTH)];
+                        Some((trimmed_field_name.to_owned(), "", true))
+                    }
+                }))
+                .colour(serenity::Colour::TEAL),
         )
-        .await?;
+        .ephemeral(true)
+}
+
+pub async fn add_reminder(
+    ctx: &Context<'_>,
+    user_id: u64,
+    message: serenity::Message,
+    remind_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), Error> {
+    let reminder = insert_reminder(&ctx.data().db_connection, user_id, message, remind_at).await?;
+
+    ctx.data().tx.send(reminder).await?;
 
     Ok(())
+}
+
+#[poise::command(context_menu_command = "Remind me in 10 seconds")]
+pub async fn remind_me_in_10_seconds(
+    ctx: Context<'_>,
+    message: serenity::Message,
+) -> Result<(), Error> {
+    let remind_at = chrono::Utc::now() + chrono::Duration::seconds(10);
+
+    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
+
+    ctx.send(get_reminder_created_reply(&remind_at)).await?;
+
+    Ok(())
+}
+
+#[poise::command(context_menu_command = "Remind me in 1 hour")]
+pub async fn remind_me_in_1_hour(
+    ctx: Context<'_>,
+    message: serenity::Message,
+) -> Result<(), Error> {
+    let remind_at = chrono::Utc::now() + chrono::Duration::hours(1);
+
+    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
+
+    ctx.send(get_reminder_created_reply(&remind_at)).await?;
+
+    Ok(())
+}
+
+#[poise::command(context_menu_command = "Remind me in 3 hours")]
+pub async fn remind_me_in_3_hours(
+    ctx: Context<'_>,
+    message: serenity::Message,
+) -> Result<(), Error> {
+    let remind_at = chrono::Utc::now() + chrono::Duration::hours(3);
+
+    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
+
+    ctx.send(get_reminder_created_reply(&remind_at)).await?;
+
+    Ok(())
+}
+
+#[poise::command(context_menu_command = "Remind me in 6 hours")]
+pub async fn remind_me_in_6_hours(
+    ctx: Context<'_>,
+    message: serenity::Message,
+) -> Result<(), Error> {
+    let remind_at = chrono::Utc::now() + chrono::Duration::hours(6);
+
+    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
+
+    ctx.send(get_reminder_created_reply(&remind_at)).await?;
+
+    Ok(())
+}
+
+#[poise::command(context_menu_command = "Remind me in 12 hours")]
+pub async fn remind_me_in_12_hours(
+    ctx: Context<'_>,
+    message: serenity::Message,
+) -> Result<(), Error> {
+    let remind_at = chrono::Utc::now() + chrono::Duration::hours(12);
+
+    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
+
+    ctx.send(get_reminder_created_reply(&remind_at)).await?;
+
+    Ok(())
+}
+
+#[poise::command(context_menu_command = "Remind me in 24 hour")]
+pub async fn remind_me_in_24_hours(
+    ctx: Context<'_>,
+    message: serenity::Message,
+) -> Result<(), Error> {
+    let remind_at = chrono::Utc::now() + chrono::Duration::hours(24);
+
+    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
+
+    ctx.send(get_reminder_created_reply(&remind_at)).await?;
+
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn remind_me_in(
+    ctx: Context<'_>,
+    #[description = "Time to wait before sending the reminder"]
+    #[min = 1]
+    #[max = 60]
+    seconds: u64,
+    #[description = "Message to remind you of"] message: serenity::Message,
+) -> Result<(), Error> {
+    let remind_at = chrono::Utc::now() + chrono::Duration::seconds(seconds as i64);
+
+    add_reminder(&ctx, ctx.author().id.get(), message, remind_at).await?;
+
+    ctx.send(
+        CreateReply::default()
+            .content(format!("Reminder set for {} seconds from now!", seconds))
+            .reply(true)
+            .ephemeral(true),
+    )
+    .await?;
+
+    Ok(())
+}
+
+fn get_discord_relative_timestamp_string(remind_at: &chrono::DateTime<chrono::Utc>) -> String {
+    format!("<t:{}:R>", remind_at.timestamp())
+}
+
+fn get_reminder_created_reply(remind_at: &chrono::DateTime<chrono::Utc>) -> CreateReply {
+    CreateReply::default()
+        .content(format!(
+            "Reminder set for {}",
+            get_discord_relative_timestamp_string(remind_at)
+        ))
+        .reply(true)
+        .ephemeral(true)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_get_discord_relative_timestamp_string() {
+        let remind_at = chrono::Utc::now();
+        let result = get_discord_relative_timestamp_string(&remind_at);
+        assert_eq!(result, format!("<t:{}:R>", remind_at.timestamp()));
+    }
+
+    #[test]
+    fn test_get_reminder_created_reply() {
+        let remind_at = chrono::Utc::now();
+        let result = get_reminder_created_reply(&remind_at);
+        assert_eq!(
+            result.content.unwrap(),
+            format!("Reminder set for <t:{}:R>", remind_at.timestamp())
+        );
+        assert_eq!(result.ephemeral, Some(true));
+        assert_eq!(result.reply, true);
+    }
+
+    #[test]
+    fn test_create_get_reminders_reply() {
+        let timestamp = chrono::Utc::now();
+
+        let reminders = vec![Ok(Reminder::new(
+            1,
+            123456789,
+            serenity::Message::default(),
+            timestamp,
+        ))];
+        let result = create_get_reminders_reply(&reminders);
+        assert_eq!(result.ephemeral, Some(true));
+
+        let embed = result.embeds.get(0).unwrap().to_owned();
+        let expected_embed = CreateEmbed::default()
+            .title("Retrieved up to 1 reminder.\nThere may be more reminders not shown.")
+            .description("## Queued Reminders: 1")
+            .field(
+                format!(
+                    "https://discord.com/channels/@me/1/1 at: <t:{}:R>",
+                    timestamp.timestamp()
+                ),
+                "",
+                true,
+            )
+            .colour(serenity::Colour::TEAL);
+        assert_eq!(embed, expected_embed);
+    }
 }

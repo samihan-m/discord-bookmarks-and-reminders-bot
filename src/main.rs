@@ -1,34 +1,56 @@
 mod commands;
+mod database;
+mod models;
 
-use poise::{samples::create_application_commands, serenity_prelude as serenity};
-use std::{env, sync::Arc, time::Duration};
+use chrono::TimeDelta;
+use database::{create_table_if_nonexistent, delete_reminder_by_id, get_all_reminders};
+use poise::{
+    samples::create_application_commands,
+    serenity_prelude::{self as serenity, CreateMessage},
+};
+use std::{cmp::Reverse, collections::BinaryHeap, env, sync::Arc};
+use tokio::sync::Mutex;
+use tokio_rusqlite::Connection;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
-pub struct Data {}
+pub struct Data {
+    db_connection: Arc<Mutex<Connection>>,
+    tx: tokio::sync::mpsc::Sender<models::Reminder>,
+}
 
 async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
     match error {
         poise::FrameworkError::Setup { error, .. } => panic!("Failed to start bot: {:?}", error),
         poise::FrameworkError::Command { error, ctx, .. } => {
-            println!("Error in command `{}`: {:?}", ctx.command().name, error,);
+            eprintln!("Error in command `{}`: {:?}", ctx.command().name, error,);
+            eprintln!("Error: {:?}", error.to_string());
         }
         error => {
             if let Err(e) = poise::builtins::on_error(error).await {
-                println!("Error while handling error: {}", e)
+                eprintln!("Error while handling error: {}", e)
             }
         }
     }
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Error> {
     let _ = dotenvy::dotenv(); // Am discarding the result because I don't actually care if there isn't a literal .env file as long as the environment variable is set
 
     let (serenity_commands, all_commands) = {
         let commands = vec![commands::help()];
-        let commands_available_in_dms = vec![commands::remind_me_context_menu_command()];
+        let commands_available_in_dms = vec![
+            commands::get_reminders(),
+            commands::remind_me_in_10_seconds(),
+            commands::remind_me_in_1_hour(),
+            commands::remind_me_in_3_hours(),
+            commands::remind_me_in_6_hours(),
+            commands::remind_me_in_12_hours(),
+            commands::remind_me_in_24_hours(),
+            commands::remind_me_in(),
+        ];
 
         let serenity_commands = [
             create_application_commands(&commands),
@@ -50,13 +72,6 @@ async fn main() {
 
     let options = poise::FrameworkOptions {
         commands: all_commands,
-        prefix_options: poise::PrefixFrameworkOptions {
-            prefix: Some("~".into()),
-            edit_tracker: Some(Arc::new(poise::EditTracker::for_timespan(
-                Duration::from_secs(3600),
-            ))),
-            ..Default::default()
-        },
         on_error: |error| Box::pin(on_error(error)),
         pre_command: |ctx| {
             Box::pin(async move {
@@ -68,27 +83,32 @@ async fn main() {
                 println!("Executed command {}!", ctx.command().qualified_name);
             })
         },
-        command_check: Some(|ctx| {
-            Box::pin(async move {
-                if ctx.author().id == 123456789 {
-                    return Ok(false);
-                }
-                Ok(true)
-            })
-        }),
         skip_checks_for_owners: false,
         event_handler: |_ctx, event, _framework, _data| {
             Box::pin(async move {
-                println!(
-                    "Got an event in event handler: {:?}",
-                    event.snake_case_name()
-                );
+                println!("Received event: {}", event.snake_case_name());
                 Ok(())
             })
         },
         ..Default::default()
     };
 
+    let db_connection = Arc::new(Mutex::new(
+        Connection::open("./reminders.db").await.unwrap(),
+    ));
+    create_table_if_nonexistent(&db_connection).await?;
+    let reminders_from_database = get_all_reminders(&db_connection)
+        .await?
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(Reverse)
+        .collect::<Vec<_>>();
+
+    let reminders_heap = BinaryHeap::from(reminders_from_database);
+
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+    let db_connection_clone = db_connection.clone();
     let framework = poise::Framework::builder()
         .setup(move |ctx, ready, _framework| {
             Box::pin(async move {
@@ -121,7 +141,10 @@ async fn main() {
                 }
 
                 println!("Logged in as {}", ready.user.name);
-                Ok(Data {})
+                Ok(Data {
+                    db_connection: db_connection_clone,
+                    tx,
+                })
             })
         })
         .options(options)
@@ -132,9 +155,64 @@ async fn main() {
         .unwrap_or_else(|_| panic!("Environment variable `{}` must be set", DISCORD_TOKEN));
     let intents = serenity::GatewayIntents::non_privileged();
 
-    let client = serenity::ClientBuilder::new(token, intents)
+    let mut client = serenity::ClientBuilder::new(token, intents)
         .framework(framework)
-        .await;
+        .await
+        .unwrap();
 
-    client.unwrap().start().await.unwrap()
+    tokio::spawn(send_reminders(
+        client.http.clone(),
+        reminders_heap,
+        db_connection,
+        rx,
+    ));
+
+    client.start().await.unwrap();
+
+    Ok(())
+}
+
+async fn send_reminders(
+    http: Arc<serenity::Http>,
+    mut reminders: BinaryHeap<Reverse<models::Reminder>>,
+    db_connection: Arc<Mutex<Connection>>,
+    mut rx: tokio::sync::mpsc::Receiver<models::Reminder>,
+) -> Result<(), Error> {
+    loop {
+        println!("{} reminders in the heap.", reminders.len());
+        let next_reminder = reminders.pop();
+
+        let sleep_time = next_reminder
+            .as_ref()
+            .map(|r| *r.0.remind_at() - chrono::Utc::now())
+            .map(|duration| duration.max(TimeDelta::zero()))
+            .unwrap_or(TimeDelta::nanoseconds(i64::MAX));
+
+        tokio::select! {
+            _ = tokio::time::sleep(sleep_time.to_std()?) => {
+                if let Some(reminder) = next_reminder {
+                    let user_id = serenity::UserId::new(reminder.0.user_id());
+
+                    let message = CreateMessage::default()
+                        .embed(reminder.0.to_embed(&http).await);
+
+                    user_id
+                        .create_dm_channel(&http)
+                        .await?
+                        .send_message(&http, message)
+                        .await?;
+
+                    delete_reminder_by_id(&db_connection, reminder.0.id())
+                        .await?;
+                }
+            }
+            Some(reminder) = rx.recv() => {
+                println!("Received reminder: {:?}", reminder);
+                if let Some(next_reminder) = next_reminder {
+                    reminders.push(next_reminder);
+                }
+                reminders.push(Reverse(reminder));
+            }
+        }
+    }
 }

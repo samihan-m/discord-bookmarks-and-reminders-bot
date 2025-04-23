@@ -3,22 +3,31 @@ mod database;
 mod models;
 
 use chrono::TimeDelta;
-use commands::{get_delete_button, DELETE_MESSAGE_EMOJI, DELETE_MESSAGE_INTERACTION_CUSTOM_ID};
-use database::{create_table_if_nonexistent, delete_reminder_by_id, get_all_reminders};
+use commands::{
+    get_delete_button, get_discord_relative_timestamp_string, ReminderSelectMenuValue,
+    DELETE_MESSAGE_EMOJI, DELETE_MESSAGE_INTERACTION_CUSTOM_ID, SET_REMINDER_INTERACTION_CUSTOM_ID,
+};
+use database::{
+    bookmark::create_bookmarks_table_if_nonexistent,
+    reminder::{create_reminders_table_if_nonexistent, delete_reminder_by_id, get_all_reminders},
+};
 use poise::{
     samples::create_application_commands,
-    serenity_prelude::{self as serenity, CreateMessage, FullEvent},
+    serenity_prelude::{
+        self as serenity, ComponentInteractionDataKind, CreateInteractionResponseMessage,
+    },
 };
 use std::{cmp::Reverse, collections::BinaryHeap, env, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_rusqlite::Connection;
+use uuid::Uuid;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
 pub struct Data {
     db_connection: Arc<Mutex<Connection>>,
-    tx: tokio::sync::mpsc::Sender<models::Reminder>,
+    tx: tokio::sync::mpsc::Sender<models::reminder::PersistedReminder>,
 }
 
 async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
@@ -45,8 +54,8 @@ async fn main() -> Result<(), Error> {
         let commands_available_in_dms = vec![
             commands::get_reminders(),
             commands::remind_me_in_10_seconds(),
-            commands::remind_me_in_1_hour(),
             commands::remind_me_in(),
+            commands::bookmark(),
         ];
 
         let serenity_commands = [
@@ -81,12 +90,12 @@ async fn main() -> Result<(), Error> {
             })
         },
         skip_checks_for_owners: false,
-        event_handler: |ctx, event, framework, _data| {
+        event_handler: |ctx, event, framework, data| {
             Box::pin(async move {
                 println!("Received event: {}", event.snake_case_name());
 
                 match event {
-                    FullEvent::ReactionAdd { add_reaction } => {
+                    serenity::FullEvent::ReactionAdd { add_reaction } => {
                         let is_reactor_not_the_bot = add_reaction.user_id != Some(framework.bot_id);
                         let is_message_from_the_bot =
                             add_reaction.message_author_id == Some(framework.bot_id);
@@ -111,21 +120,93 @@ async fn main() -> Result<(), Error> {
                                 .await?;
                         }
                     }
-                    FullEvent::InteractionCreate { interaction } => {
+                    serenity::FullEvent::InteractionCreate { interaction } => {
+                        println!("Received interaction: {:?}", interaction);
                         if let Some(component_interaction) = interaction.as_message_component() {
-                            if component_interaction.data.custom_id
-                                == DELETE_MESSAGE_INTERACTION_CUSTOM_ID
-                            {
-                                ctx.http
-                                    .delete_message(
-                                        component_interaction.channel_id,
-                                        component_interaction.message.id,
-                                        Some(&format!(
-                                            "Deletion requested by: {}",
-                                            component_interaction.user.id
-                                        )),
+                            match InteractionCustomId::try_from(
+                                &component_interaction.data.custom_id[..],
+                            ) {
+                                Ok(InteractionCustomId::DeleteMessage) => {
+                                    ctx.http
+                                        .delete_message(
+                                            component_interaction.channel_id,
+                                            component_interaction.message.id,
+                                            Some(&format!(
+                                                "Deletion requested by: {}",
+                                                component_interaction.user.id
+                                            )),
+                                        )
+                                        .await?;
+                                }
+                                Ok(InteractionCustomId::SetReminder(bookmark_id)) => {
+                                    let db_connection = data.db_connection.clone();
+                                    let bookmark = database::bookmark::get_bookmark_by_id(
+                                        &db_connection,
+                                        bookmark_id,
                                     )
-                                    .await?;
+                                    .await?
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "Expected bookmark {} to be found in database",
+                                            bookmark_id
+                                        )
+                                    });
+                                    match &component_interaction.data.kind {
+                                        ComponentInteractionDataKind::StringSelect { values } => {
+                                            let selected_value = values
+                                                .first()
+                                                .unwrap_or_else(|| panic!("Expected at least one value to be selected, received: {:?}", values));
+                                            let reminder_wait_duration = chrono::Duration::from(
+                                                ReminderSelectMenuValue::try_from(
+                                                    selected_value.as_str(),
+                                                )
+                                                .unwrap_or_else(|err| {
+                                                    panic!(
+                                                        "Failed to parse selected value: {}",
+                                                        err
+                                                    )
+                                                }),
+                                            );
+                                            assert!(
+                                                component_interaction.user.id == bookmark.user_id(),
+                                                "Expected user ID to match bookmark user ID"
+                                            );
+                                            let remind_at =
+                                                chrono::Utc::now() + reminder_wait_duration;
+                                            let reminder = models::reminder::Reminder::new(
+                                                bookmark.user_id(),
+                                                bookmark.message().clone(),
+                                                remind_at,
+                                            );
+                                            let persisted_reminder =
+                                                database::reminder::insert_reminder(
+                                                    &db_connection,
+                                                    reminder,
+                                                )
+                                                .await?;
+                                            data.tx.send(persisted_reminder).await?;
+                                            component_interaction
+                                                .create_response(
+                                                    &ctx.http,
+                                                    serenity::CreateInteractionResponse::Message(
+                                                        CreateInteractionResponseMessage::new()
+                                                            .content(format!(
+                                                                "Reminder set for {}",
+                                                                get_discord_relative_timestamp_string(&remind_at)
+                                                            ))
+                                                            .ephemeral(true),
+                                                    ),
+                                                )
+                                                .await?;
+                                        }
+                                        _ => {
+                                            panic!("Received unexpected interaction data kind for custom id {}: {:?}", component_interaction.data.custom_id, component_interaction.data.kind);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("{}", e);
+                                }
                             }
                         }
                     }
@@ -138,14 +219,14 @@ async fn main() -> Result<(), Error> {
         ..Default::default()
     };
 
-    let db_connection = Arc::new(Mutex::new(
-        Connection::open("./reminders.db").await.unwrap(),
-    ));
-    create_table_if_nonexistent(&db_connection).await?;
+    let db_connection = Arc::new(Mutex::new(Connection::open("./data.db").await.unwrap()));
+    let _ = tokio::try_join!(
+        create_reminders_table_if_nonexistent(&db_connection),
+        create_bookmarks_table_if_nonexistent(&db_connection),
+    )?;
     let reminders_from_database = get_all_reminders(&db_connection)
         .await?
         .into_iter()
-        .filter_map(Result::ok)
         .map(Reverse)
         .collect::<Vec<_>>();
 
@@ -219,9 +300,9 @@ async fn main() -> Result<(), Error> {
 
 async fn send_reminders(
     http: Arc<serenity::Http>,
-    mut reminders: BinaryHeap<Reverse<models::Reminder>>,
+    mut reminders: BinaryHeap<Reverse<models::reminder::PersistedReminder>>,
     db_connection: Arc<Mutex<Connection>>,
-    mut rx: tokio::sync::mpsc::Receiver<models::Reminder>,
+    mut rx: tokio::sync::mpsc::Receiver<models::reminder::PersistedReminder>,
 ) -> Result<(), Error> {
     loop {
         println!("{} reminders in the heap.", reminders.len());
@@ -230,15 +311,16 @@ async fn send_reminders(
         let sleep_time = next_reminder
             .as_ref()
             .map(|r| *r.0.remind_at() - chrono::Utc::now())
-            .map(|duration| duration.max(TimeDelta::zero()))
-            .unwrap_or(TimeDelta::nanoseconds(i64::MAX));
+            .map(|duration: TimeDelta| duration.max(TimeDelta::zero()))
+            .unwrap_or(TimeDelta::nanoseconds(i64::MAX))
+            .to_std()?;
 
         tokio::select! {
-            _ = tokio::time::sleep(sleep_time.to_std()?) => {
+            _ = tokio::time::sleep(sleep_time) => {
                 if let Some(reminder) = next_reminder {
                     let user_id = serenity::UserId::new(reminder.0.user_id());
 
-                    let message = CreateMessage::default()
+                    let message = serenity::CreateMessage::default()
                         .embed(reminder.0.to_embed(&http).await)
                         .button(get_delete_button());
 
@@ -248,7 +330,7 @@ async fn send_reminders(
                         .send_message(&http, message)
                         .await?;
 
-                    delete_reminder_by_id(&db_connection, reminder.0.id())
+                    delete_reminder_by_id(&db_connection, reminder.0.pk())
                         .await?;
                 }
             }
@@ -259,6 +341,51 @@ async fn send_reminders(
                 }
                 reminders.push(Reverse(reminder));
             }
+        }
+    }
+}
+
+/*
+Things I need to do
+1. Create 'Bookmarks' table - autoinc int pk, text (uuid) bookmark_id, text (u64) user_id, text (json) message
+2. Create context menu command 'Bookmark' - generates random bookmark_id + adds bookmark to table; sends user dm with link to message (looks like the current reminder embed) + select menu asking if they want to be reminded.
+custom_data_id should contain the bookmark_id
+3. Upon receiving an interaction event, get the bookmark_id from the custom_data_id and get the bookmark from the database, create reminder, and insert it into table + heap
+*/
+
+enum InteractionCustomId {
+    DeleteMessage,
+    SetReminder(Uuid),
+}
+
+impl From<InteractionCustomId> for String {
+    fn from(value: InteractionCustomId) -> Self {
+        match value {
+            InteractionCustomId::DeleteMessage => DELETE_MESSAGE_INTERACTION_CUSTOM_ID.to_string(),
+            InteractionCustomId::SetReminder(uuid) => {
+                format!("{}:{}", SET_REMINDER_INTERACTION_CUSTOM_ID, uuid)
+            }
+        }
+    }
+}
+
+impl TryFrom<&str> for InteractionCustomId {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let parts: Vec<&str> = value.split(':').collect();
+        match parts.as_slice() {
+            [DELETE_MESSAGE_INTERACTION_CUSTOM_ID] => Ok(Self::DeleteMessage),
+            [SET_REMINDER_INTERACTION_CUSTOM_ID, uuid] => {
+                let uuid = Uuid::parse_str(uuid).map_err(|_| {
+                    format!(
+                        "Received invalid UUID for {}: {}",
+                        SET_REMINDER_INTERACTION_CUSTOM_ID, uuid
+                    )
+                })?;
+                Ok(Self::SetReminder(uuid))
+            }
+            _ => Err(format!("Received invalid custom ID: {}", value)),
         }
     }
 }

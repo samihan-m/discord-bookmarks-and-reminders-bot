@@ -1,3 +1,4 @@
 /target
 .env
-reminders.db
+
+data.db

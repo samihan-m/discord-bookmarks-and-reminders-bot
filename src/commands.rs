@@ -120,6 +120,7 @@ pub async fn remind_me_in_10_seconds(
     Ok(())
 }
 
+/// Get a subset of your bookmarks
 #[poise::command(slash_command)]
 pub async fn get_bookmarks(
     ctx: Context<'_>,

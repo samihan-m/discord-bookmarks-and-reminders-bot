@@ -13,6 +13,7 @@ pub struct BookmarkedMessage {
 pub struct PersistedBookmarkedMessage {
     /// Sqlite integers are signed (otherwise I would make this a [`u64`])
     pk: i64,
+    /// This is a UUIDv7 so we can sort by creation time without a timestamp field
     bookmark_id: Uuid,
     user_id: u64,
     message: serenity::Message,
@@ -60,7 +61,7 @@ impl PersistedBookmarkedMessage {
         }
     }
 
-    fn from_row(
+    pub fn from_row(
         pk: i64,
         bookmark_id: String, // ideally, a uuid string
         user_id: String,     // Sqlite integers are signed
@@ -82,35 +83,6 @@ impl PersistedBookmarkedMessage {
             user_id,
             message,
         })
-    }
-
-    pub async fn to_embed(&self, http: &serenity::Http) -> serenity::CreateEmbed {
-        let channel_name = self
-            .message
-            .channel_id
-            .name(http)
-            // This will error if we don't have permission to get DM channel information (which we currently do not)
-            .await
-            .map(|name| format!("#{}", name))
-            .unwrap_or("the past!".to_string());
-
-        self.create_embed(&channel_name)
-    }
-
-    fn create_embed(&self, channel_name: &str) -> serenity::CreateEmbed {
-        let title = format!("Bookmarked message from {}", channel_name);
-        const MAX_TITLE_LENGTH: usize = 256;
-        let trimmed_title = &title[..title.len().min(MAX_TITLE_LENGTH)];
-
-        let description = format!("# {} \n # {}", self.message.content, self.message.link());
-        const MAX_DESCRIPTION_LENGTH: usize = 4096;
-        let trimmed_description = &description[..description.len().min(MAX_DESCRIPTION_LENGTH)];
-
-        serenity::CreateEmbed::default()
-            .title(trimmed_title)
-            .description(trimmed_description)
-            .timestamp(self.message.timestamp)
-            .colour(serenity::Colour::TEAL)
     }
 
     #[expect(dead_code)]

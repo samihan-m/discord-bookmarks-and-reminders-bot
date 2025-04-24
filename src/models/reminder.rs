@@ -1,9 +1,9 @@
-use poise::serenity_prelude::{self, CreateEmbed};
+use poise::serenity_prelude as serenity;
 
 #[derive(Debug)]
 pub struct Reminder {
     user_id: u64,
-    message: serenity_prelude::Message,
+    message: serenity::Message,
     remind_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -12,7 +12,7 @@ pub struct PersistedReminder {
     /// Sqlite integers are signed (otherwise I would make this a [`u64`])
     pk: i64,
     user_id: u64,
-    message: serenity_prelude::Message,
+    message: serenity::Message,
     remind_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -29,7 +29,7 @@ pub enum ParseReminderError {
 impl Reminder {
     pub fn new(
         user_id: u64,
-        message: serenity_prelude::Message,
+        message: serenity::Message,
         remind_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         Self {
@@ -43,7 +43,7 @@ impl Reminder {
         self.user_id
     }
 
-    pub fn message(&self) -> &serenity_prelude::Message {
+    pub fn message(&self) -> &serenity::Message {
         &self.message
     }
 
@@ -77,7 +77,7 @@ impl PersistedReminder {
     ) -> Result<Self, ParseReminderError> {
         let user_id = user_id.parse::<u64>().map_err(ParseReminderError::UserId)?;
 
-        let message = serde_json::from_str::<serenity_prelude::Message>(&message)
+        let message = serde_json::from_str::<serenity::Message>(&message)
             .map_err(ParseReminderError::Message)?;
 
         let remind_at = chrono::DateTime::parse_from_rfc3339(&remind_at)
@@ -92,33 +92,13 @@ impl PersistedReminder {
         })
     }
 
-    pub async fn to_embed(&self, http: &serenity_prelude::Http) -> CreateEmbed {
-        let channel_name = self
-            .message
-            .channel_id
-            .name(http)
-            // This will error if we don't have permission to get DM channel information (which we currently do not)
-            .await
-            .map(|name| format!("#{}", name))
-            .unwrap_or("the past!".to_string());
-
-        self.create_embed(&channel_name)
-    }
-
-    fn create_embed(&self, channel_name: &str) -> CreateEmbed {
-        let title = format!("Reminder from {}", channel_name);
-        const MAX_TITLE_LENGTH: usize = 256;
-        let trimmed_title = &title[..title.len().min(MAX_TITLE_LENGTH)];
-
-        let description = format!("# {} \n # {}", self.message.content, self.message.link());
-        const MAX_DESCRIPTION_LENGTH: usize = 4096;
-        let trimmed_description = &description[..description.len().min(MAX_DESCRIPTION_LENGTH)];
-
-        CreateEmbed::default()
-            .title(trimmed_title)
-            .description(trimmed_description)
-            .timestamp(self.message.timestamp)
-            .colour(serenity_prelude::Colour::TEAL)
+    pub fn get_sleep_time_until_reminder_should_trigger(&self) -> std::time::Duration {
+        self.remind_at
+            .signed_duration_since(chrono::Utc::now())
+            .to_std()
+            // If the duration was negative (i.e. we encountered an OutOfRangeError in to_std()), it means the reminder is past due.
+            // so, don't sleep at all.
+            .unwrap_or(std::time::Duration::from_secs(0))
     }
 
     pub fn pk(&self) -> i64 {
@@ -129,7 +109,7 @@ impl PersistedReminder {
         self.user_id
     }
 
-    pub fn message(&self) -> &serenity_prelude::Message {
+    pub fn message(&self) -> &serenity::Message {
         &self.message
     }
 
@@ -169,38 +149,13 @@ mod tests {
     fn test_reminder_from_row() {
         let pk = 1;
         let user_id = "123456789".to_string();
-        let message = serde_json::to_string(&serenity_prelude::Message::default()).unwrap();
+        let message = serde_json::to_string(&serenity::Message::default()).unwrap();
         let some_time = chrono::Utc::now();
         let remind_at = some_time.to_rfc3339();
         let reminder = PersistedReminder::from_row(pk, user_id, message, remind_at).unwrap();
         assert_eq!(reminder.pk, pk);
         assert_eq!(reminder.user_id, 123456789);
-        assert_eq!(reminder.message.id, serenity_prelude::Message::default().id);
+        assert_eq!(reminder.message.id, serenity::Message::default().id);
         assert_eq!(reminder.remind_at, some_time);
-    }
-
-    #[test]
-    fn test_create_embed() {
-        let pk = 1;
-        let user_id = 123456789;
-        let message = serenity_prelude::Message::default();
-        let remind_at = chrono::Utc::now();
-        let reminder = PersistedReminder {
-            pk,
-            user_id,
-            message: message.clone(),
-            remind_at,
-        };
-
-        let channel_name = "#test_channel";
-
-        let embed = reminder.create_embed(channel_name);
-
-        let expected_embed = CreateEmbed::default()
-            .title("Reminder from #test_channel")
-            .description(&format!("# {} \n # {}", message.content, message.link()))
-            .timestamp(message.timestamp)
-            .colour(serenity_prelude::Colour::TEAL);
-        assert_eq!(embed, expected_embed);
     }
 }

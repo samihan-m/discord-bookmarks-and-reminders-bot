@@ -117,6 +117,28 @@ pub async fn get_bookmark_by_id(
         .await
 }
 
+pub async fn get_bookmarks_for_user(
+    db_connection: &Mutex<Connection>,
+    user_id: u64,
+    max_quantity_to_retrieve: u64,
+    offset: u64,
+) -> Result<Vec<PersistedBookmarkedMessage>, tokio_rusqlite::Error> {
+    db_connection
+        .lock()
+        .await
+        .call(move |conn| {
+            let reminders = conn
+                .prepare(
+                    "SELECT * FROM bookmarks WHERE user_id = ?1 ORDER BY bookmark_id DESC LIMIT ?2 OFFSET ?3",
+                )?
+                .query_map([user_id, max_quantity_to_retrieve, offset], bookmark_from_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(reminders)
+        })
+        .await
+}
+
 fn bookmark_from_row(row: &Row<'_>) -> Result<PersistedBookmarkedMessage, rusqlite::Error> {
     match PersistedBookmarkedMessage::try_from(row) {
         Ok(bookmark) => Ok(bookmark),

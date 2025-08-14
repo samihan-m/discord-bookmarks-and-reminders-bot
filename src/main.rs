@@ -232,8 +232,12 @@ async fn main() -> Result<(), Error> {
     let framework = poise::Framework::builder()
         .setup(move |ctx, ready, _framework| {
             Box::pin(async move {
-                serenity::Command::set_global_commands(ctx.http.clone(), serenity_commands.clone())
-                    .await?;
+                #[cfg(debug_assertions)]
+                {
+                    println!("Setting global commands...");
+                    serenity::Command::set_global_commands(ctx.http.clone(), serenity_commands.clone())
+                        .await?;
+                }
 
                 const TEST_GUILD_ID: &str = "TEST_GUILD_ID";
 

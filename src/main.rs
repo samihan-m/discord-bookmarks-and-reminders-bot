@@ -51,7 +51,7 @@ async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
     }
 }
 
-async fn on_event<'a>(
+async fn on_event(
     ctx: &serenity::Context,
     event: &FullEvent,
     framework: FrameworkContext<'_, Data, Error>,

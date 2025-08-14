@@ -33,6 +33,10 @@ pub async fn create_bookmarks_table_if_nonexistent(
         .await
 }
 
+#[expect(clippy::large_enum_variant)]
+// Noticing the #[expect(dead_code)] on the 2nd variant, only the first variant (the large one) is actually in-use.
+// That means there isn't any size wasted when passing around the 2nd variant (as it is never used).
+// So, until that changes, I don't super see a need to address this large size discrepancy
 #[derive(Debug)]
 pub enum InsertBookmarkError {
     BookmarkAlreadyExists(PersistedBookmarkedMessage),

@@ -239,14 +239,14 @@ async fn main() -> Result<(), Error> {
                         .await?;
                 }
 
-                const TEST_GUILD_ID: &str = "TEST_GUILD_ID";
+                const TEST_GUILD_ID_ENV_VAR_NAME: &str = "TEST_GUILD_ID";
 
-                match env::var(TEST_GUILD_ID) {
+                match env::var(TEST_GUILD_ID_ENV_VAR_NAME) {
                     Ok(guild_id) => {
                         let guild_id = serenity::GuildId::new(
                             guild_id
                                 .parse::<u64>()
-                                .unwrap_or_else(|_| panic!("Environment variable `{}` must be a valid u64", TEST_GUILD_ID))
+                                .unwrap_or_else(|_| panic!("Environment variable `{}` must be a valid u64", TEST_GUILD_ID_ENV_VAR_NAME))
                         );
                         // This will make each command appear twice in the command list specifically only for the test guild
                         guild_id
@@ -256,11 +256,11 @@ async fn main() -> Result<(), Error> {
                     Err(env::VarError::NotPresent) => {
                         println!(
                             "Environment variable `{}` not set, skipping guild command registration",
-                            TEST_GUILD_ID
+                            TEST_GUILD_ID_ENV_VAR_NAME
                         );
                     }
                     Err(env::VarError::NotUnicode(_)) => {
-                        panic!("Environment variable `{}` must be a valid UTF-8 string", TEST_GUILD_ID);
+                        panic!("Environment variable `{}` must be a valid UTF-8 string", TEST_GUILD_ID_ENV_VAR_NAME);
                     }
                 }
 

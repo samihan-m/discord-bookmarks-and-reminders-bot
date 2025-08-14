@@ -316,11 +316,14 @@ async fn send_reminders(
         tokio::select! {
             _ = tokio::time::sleep(sleep_time) => {
                 if let Some(Reverse(reminder)) = next_reminder {
-                    let channel_name = &reminder.message().channel_id.name(&http).await.unwrap_or("the past!".to_string());
+                    let channel_name = reminder.message().channel_id.name(&http).await.unwrap_or_else(|err| {
+                        eprintln!("Failed to get channel name for channel ID {}: {}", reminder.message().channel_id, err);
+                        "the past!".to_string()
+                    });
 
                     let message = get_reminder_message(
                         &reminder,
-                        channel_name,
+                        &channel_name,
                         DELETE_MESSAGE_INTERACTION_CUSTOM_ID,
                         DELETE_MESSAGE_EMOJI
                     );

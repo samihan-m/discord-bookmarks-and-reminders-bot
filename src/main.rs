@@ -179,7 +179,11 @@ async fn main() -> Result<(), Error> {
             create_application_commands(&commands),
             create_application_commands(&commands_available_in_dms)
                 .into_iter()
-                .map(|command| command.add_context(serenity::InteractionContext::PrivateChannel).add_context(serenity::InteractionContext::BotDm))
+                .map(|command| {
+                    command
+                        .add_context(serenity::InteractionContext::PrivateChannel)
+                        .add_context(serenity::InteractionContext::BotDm)
+                })
                 .collect(),
         ]
         .concat();

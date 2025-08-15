@@ -148,7 +148,8 @@ pub async fn get_bookmarks(
         return Ok(());
     }
 
-    ctx.send(create_get_bookmarks_reply(&bookmarks)).await?;
+    ctx.send(create_get_bookmarks_reply(&bookmarks, ctx.cache()))
+        .await?;
 
     Ok(())
 }

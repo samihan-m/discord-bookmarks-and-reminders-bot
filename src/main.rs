@@ -164,6 +164,7 @@ async fn on_event(
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    let should_reregister_commands_globally = env::args().any(|arg| arg == "--reregister");
     let _ = dotenvy::dotenv(); // Am discarding the result because I don't actually care if there isn't a literal .env file as long as the environment variable is set
 
     let (serenity_commands, all_commands) = {
@@ -236,8 +237,7 @@ async fn main() -> Result<(), Error> {
     let framework = poise::Framework::builder()
         .setup(move |ctx, ready, _framework| {
             Box::pin(async move {
-                #[cfg(debug_assertions)]
-                {
+                if should_reregister_commands_globally {
                     println!("Setting global commands...");
                     serenity::Command::set_global_commands(ctx.http.clone(), serenity_commands.clone())
                         .await?;

@@ -279,9 +279,13 @@ async fn main() -> Result<(), Error> {
         .options(options)
         .build();
 
-    const DISCORD_TOKEN: &str = "DISCORD_TOKEN";
-    let token = env::var(DISCORD_TOKEN)
-        .unwrap_or_else(|_| panic!("Environment variable `{}` must be set", DISCORD_TOKEN));
+    const DISCORD_TOKEN_ENV_VAR_NAME: &str = "DISCORD_TOKEN";
+    let token = env::var(DISCORD_TOKEN_ENV_VAR_NAME).unwrap_or_else(|_| {
+        panic!(
+            "Environment variable `{}` must be set",
+            DISCORD_TOKEN_ENV_VAR_NAME
+        )
+    });
     let intents = serenity::GatewayIntents::non_privileged();
 
     let mut client = serenity::ClientBuilder::new(token, intents)
